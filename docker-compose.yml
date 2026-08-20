@@ -1,0 +1,6 @@
+services:
+  api:
+    build:
+      context: .
+      target: dev
+    command: ["npm", "test"]
