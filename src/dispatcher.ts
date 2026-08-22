@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import type { Container, Ctor } from './container.js';
 import { collectRoutes } from './router.js';
 
@@ -25,7 +25,7 @@ function matchPath(pattern: string, pathname: string) {
   return params;
 }
 
-export function listen(container: Container, controllers: Ctor[], port: number) {
+export function listen(container: Container, controllers: Ctor[], port: number): Promise<Server> {
   const routeList = controllers.reduce((acc, Controller) => {
     collectRoutes(Controller).forEach((route) => {
       acc.push({ ...route, Controller });
@@ -94,5 +94,12 @@ export function listen(container: Container, controllers: Ctor[], port: number) 
 
     res.end(JSON.stringify(ctrl[matchedRoute.handler](...args)));
   });
-  server.listen(port, () => console.log('listen', port));
+
+  return new Promise((resolve, reject) => {
+    server.listen(port, () => {
+      console.log('listen', port);
+      resolve(server);
+    });
+    server.on('error', reject);
+  });
 }
