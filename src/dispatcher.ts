@@ -54,15 +54,30 @@ export function listen(container: Container, controllers: Ctor[], port: number):
     const meta = Reflect.getMetadata(PARAM_METADATA, matchedRoute.Controller.prototype, matchedRoute.handler) ?? {};
     let body: unknown;
     if (req.method === 'POST') {
-      body = await new Promise((resolve, reject) => {
-        const chunks: Buffer[] = [];
-        req.on('data', (chunk) => chunks.push(chunk));
-        req.on('end', () => {
-          const raw = Buffer.concat(chunks).toString();
-          resolve(raw ? JSON.parse(raw) : undefined);
-        });
-        req.on('error', reject);
-      });
+      try{
+        body = await new Promise((resolve, reject) => {
+          const chunks: Buffer[] = [];
+          req.on('data', (chunk) => chunks.push(chunk));
+          req.on('end', () => {
+            const raw = Buffer.concat(chunks).toString();
+            if(raw){
+              try{
+                resolve(JSON.parse(raw))
+              } catch (error) {
+                reject(error)
+                return
+              }
+            }
+
+            resolve(undefined);
+          });
+          req.on('error', reject);
+        })
+      } catch(error) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'invalid json' }));
+        return;
+      }
     }
     const args = Object.keys(meta).reduce<unknown[]>((acc, key) => {
       const spec = meta[key];
@@ -92,7 +107,14 @@ export function listen(container: Container, controllers: Ctor[], port: number):
       throw error;
     }
 
-    res.end(JSON.stringify(ctrl[matchedRoute.handler](...args)));
+    try{
+      const raw = await ctrl[matchedRoute.handler](...args);
+      res.end(JSON.stringify(raw));
+    } catch {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'internal' }));
+      return;
+    }
   });
 
   return new Promise((resolve, reject) => {
