@@ -1,15 +1,15 @@
 # mini-nest
 
-Свій IoC-контейнер: сам читає типи з конструктора і збирає граф залежностей. Частина 1 з 3.
+Свій IoC-контейнер і HTTP-шар поверх `node:http`. Частина 2 з 3.
 
-TypeScript 6, `reflect-metadata`, тести на `node:test`. Сторонніх контейнерів немає.
+TypeScript 6, `reflect-metadata`, `class-validator` + `class-transformer`, тести на `node:test`. Nest / Express / Fastify немає.
 
 ## Запуск
 
 ```bash
 npm install
 npm test    # tsc + node --test
-npm start   # демо: граф, скоупи, помилка циклу
+npm start   # демо IoC + слухає :3000
 ```
 
 У Docker (образ із ДЗ #5):
@@ -26,7 +26,14 @@ docker compose run --rm api npm test
 | `src/decorators/inject.ts` | `@Inject(token)` — явний токен для параметра конструктора |
 | `src/container.ts` | `resolve()`: рекурсія, кеш синглтонів, детекція циклу |
 | `src/tokens.ts` | символи: ключі метаданих і токен `CONFIG` |
-| `src/main.ts` | демо-граф `UserService → UserRepo → Logger → CONFIG` |
+| `src/decorators/controller.ts` | `@Controller(prefix)` — базовий шлях |
+| `src/decorators/methods.ts` | `@Get` / `@Post` — метод і шлях на хендлері |
+| `src/decorators/param.ts` | `@Body` / `@Param` / `@Query` — звідки брати аргумент |
+| `src/router.ts` | збір маршрутів з метаданих |
+| `src/dispatcher.ts` | `node:http`: матч шляху, args, пайп, виклик через контейнер |
+| `src/pipes/validation.pipe.ts` | `plainToInstance` + `validate` → 400 або екземпляр DTO |
+| `src/dto/create-user.dto.ts` | контракт тіла POST |
+| `src/main.ts` | демо-граф і `listen(..., 3000)` |
 | `test/` | тести |
 
 ## Можливості
@@ -35,6 +42,8 @@ docker compose run --rm api npm test
 - `@Inject(token)` для того, чого в рантаймі немає: інтерфейсів, конфігів, рядків;
 - цикл падає з ланцюгом `Left -> Right -> Left`, а не зі `RangeError`;
 - клас без `@Injectable()` не створює й каже про це прямо.
+- `@Controller` + `@Get`/`@Post` збираються в маршрути з метаданих; `@Param`/`@Query`/`@Body` — у аргументи хендлера;
+- невалідний DTO → 400 `[{ field, constraints }]`, валідний — екземпляр класу.
 
 ## Як це працює
 
@@ -59,3 +68,5 @@ docker compose run --rm api npm test
 існує; звідси й потреба в `@Inject(Symbol.for('CONFIG'))`. Клас же сам собі токен, бо існує як
 функція. Параметр-декоратор при цьому лише запамʼятовує «для параметра №0 потрібен цей токен» —
 значення підставляє контейнер під час `new`.
+
+`@Param('id')` / `@Query` / `@Body` пишуть ту саму ідею, але на метод: `(prototype, ім'яМетоду, index)` → мапа `{ [index]: { type, name } }`. Диспетчер читає мапу і збирає `args` для виклику. Декоратор сам значення з URL не дістає.
