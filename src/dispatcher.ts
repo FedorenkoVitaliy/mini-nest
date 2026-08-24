@@ -6,8 +6,9 @@ import { PARAM_METADATA } from './tokens.js';
 import { ZodValidationPipe } from './pipes/zod-validation.pipe.js';
 import { AuthGuard } from './guards/auth.guard.js';
 import { LoggingInterceptor } from './interceptors/logging.interceptor.js';
-import { HttpFilter } from './filters/http-exception.filter.js';
+import { HttpFilter } from './filters/exception.filter.js';
 import { als } from './context/request-context.js';
+import { NotFoundError } from './errors/not-found.error.js';
 
 function matchPath(pattern: string, pathname: string) {
   const fromRoute = pattern.split('/').filter(Boolean);
@@ -42,24 +43,16 @@ export function listen(container: Container, controllers: Ctor[], port: number):
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
 
-    const url = new URL(req.url ?? '/', 'http://x');
-    const matchedRoute = routeList.find(
-      (route) => route.method === req.method && matchPath(route.path, url.pathname) !== null,
-    );
-
-    if (!matchedRoute) {
-      res.statusCode = 404;
-      res.end(JSON.stringify({ error: 'not found' }));
-      return;
-    }
-
     const requestId = String(req.headers['x-request-id'] ?? crypto.randomUUID())
     res.setHeader('x-request-id', requestId);
 
     await als.run({ requestId }, async () => { 
- 
-      
       try{
+        const url = new URL(req.url ?? '/', 'http://x');
+        const matchedRoute = routeList.find(
+          (route) => route.method === req.method && matchPath(route.path, url.pathname) !== null,
+        );
+        if (!matchedRoute) { throw new NotFoundError(`Cannot ${req.method} ${url.pathname}`) }
         const params = matchPath(matchedRoute.path, url.pathname)!;
         const ctrl = container.resolve(matchedRoute.Controller) as Record<string, Function>;
         const meta = Reflect.getMetadata(PARAM_METADATA, matchedRoute.Controller.prototype, matchedRoute.handler) ?? {};

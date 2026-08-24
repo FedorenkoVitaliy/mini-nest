@@ -10,15 +10,8 @@ import { Get, Post } from '../src/decorators/methods.js';
 import { Body, Param, Query } from '../src/decorators/param.js';
 import { CreateUserDto } from '../src/dto/create-user.dto.js';
 import { listen } from '../src/dispatcher.js';
-
-const PHASES = [
-  'middleware',
-  'guard',
-  'interceptor:before',
-  'pipe',
-  'handler',
-  'interceptor:after',
-] as const;
+import { als } from '../src/context/request-context.js';
+import { NotFoundError } from '../src/errors/not-found.error.js';
 
 let findCalled = false;
 
@@ -26,9 +19,10 @@ let findCalled = false;
 @Controller('users')
 class UsersController {
   @Get(':id')
-  find(@Param('id') id: string, @Query('limit') limit: string) {
+  async find(@Param('id') id: string, @Query('limit') limit: string) {
+    await new Promise((resolve) => setTimeout(resolve, 15));
     findCalled = true;
-    return { id, limit };
+    return { id, limit, requestId: als.getStore()?.requestId };
   }
 
   @Post()
@@ -46,11 +40,20 @@ class CrashController {
   }
 }
 
+@Injectable()
+@Controller('items')
+class ItemsController {
+  @Get(':id')
+  find(@Param('id') id: string) {
+    throw new NotFoundError(`item ${id} not found`);
+  }
+}
+
 let server: Server;
 let base: string;
 
 before(async () => {
-  server = await listen(new Container(), [UsersController, CrashController], 0);
+  server = await listen(new Container(), [UsersController, CrashController, ItemsController], 0);
   const addr = server.address() as AddressInfo;
   base = `http://127.0.0.1:${addr.port}`;
 });
@@ -63,9 +66,12 @@ after(async () => {
 
 const auth = { authorization: 'Bearer x' };
 
-test('невідомий шлях дає 404', async () => {
-  const res = await fetch(`${base}/nope`);
+test('невідомий шлях дає 404 з повідомленням і X-Request-Id', async () => {
+  const res = await fetch(`${base}/nope`, { headers: { 'x-request-id': 'missing-route' } });
+  const body = await res.json();
   assert.equal(res.status, 404);
+  assert.match(String(body.error), /Cannot GET \/nope/);
+  assert.equal(res.headers.get('x-request-id'), 'missing-route');
 });
 
 test('GET /users/:id склеює префікс і шлях', async () => {
@@ -111,25 +117,6 @@ test('валідний body доходить до методу (Zod віддає
   assert.equal(body.isDto, false);
 });
 
-test('порядок шарів: middleware → guard → interceptor → pipe → handler', async () => {
-  const orig = console.log;
-  const steps: string[] = [];
-  console.log = (msg?: unknown, ...rest: unknown[]) => {
-    if (typeof msg === 'string' && (PHASES as readonly string[]).includes(msg)) {
-      steps.push(msg);
-    }
-    orig(msg, ...rest);
-  };
-
-  try {
-    const res = await fetch(`${base}/users/42`, { headers: auth });
-    assert.equal(res.status, 200);
-    assert.deepEqual(steps, [...PHASES]);
-  } finally {
-    console.log = orig;
-  }
-});
-
 test('без Authorization — 403, хендлер не викликається', async () => {
   findCalled = false;
   const res = await fetch(`${base}/users/42`);
@@ -153,30 +140,47 @@ test('interceptor пише рядок з ms', async () => {
   }
 });
 
-test('помилка хендлера → 500 без тексту boom', async () => {
+test('помилка хендлера → 500 без boom і без стеку', async () => {
   const res = await fetch(`${base}/crash`, { headers: auth });
   const text = await res.text();
   assert.equal(res.status, 500);
-  assert.equal(text.includes('boom'), false);
+  assert.equal(/boom|at .+\.ts:/.test(text), false);
 });
 
-test('X-Request-Id з запиту повертається у відповіді', async () => {
+test('NotFoundError з хендлера → 404 з повідомленням', async () => {
+  const res = await fetch(`${base}/items/7`, { headers: auth });
+  const body = await res.json();
+  assert.equal(res.status, 404);
+  assert.equal(body.error, 'item 7 not found');
+});
+
+test('X-Request-Id з запиту повертається у відповіді і в тілі зі store', async () => {
   const res = await fetch(`${base}/users/42`, {
     headers: { ...auth, 'x-request-id': 'abc' },
   });
+  const body = await res.json();
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('x-request-id'), 'abc');
+  assert.equal(body.requestId, 'abc');
 });
 
-test('паралельні запити не змішують X-Request-Id', async () => {
+test('паралельні запити не змішують requestId зі store', async () => {
   const ids = Array.from({ length: 10 }, (_, i) => `id-${i}`);
-  const headersList = await Promise.all(
+  const bodies = await Promise.all(
     ids.map(async (id) => {
       const res = await fetch(`${base}/users/42`, {
         headers: { ...auth, 'x-request-id': id },
       });
-      return res.headers.get('x-request-id');
+      const body = await res.json();
+      return { header: res.headers.get('x-request-id'), requestId: body.requestId };
     }),
   );
-  assert.deepEqual(headersList, ids);
+  assert.deepEqual(
+    bodies.map((row) => row.header),
+    ids,
+  );
+  assert.deepEqual(
+    bodies.map((row) => row.requestId),
+    ids,
+  );
 });

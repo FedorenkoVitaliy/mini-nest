@@ -34,11 +34,14 @@ docker compose run --rm api npm test
 | `src/guards/auth.guard.ts` | `canActivate` — є `Authorization` чи ні |
 | `src/interceptors/logging.interceptor.ts` | обгортка: лог до/після + `ms` |
 | `src/pipes/zod-validation.pipe.ts` | `safeParse` → дані або `ValidationFailed` |
-| `src/filters/http-exception.filter.ts` | помилка → 400 / 500 |
+| `src/filters/exception.filter.ts` | помилка → 404 / 400 / 500 |
+| `src/errors/not-found.error.ts` | доменна `NotFoundError` |
 | `src/context/request-context.ts` | `AsyncLocalStorage` з `requestId` |
+| `src/services/` | логер і репозиторій читають id зі store |
 | `src/dto/create-user.schema.ts` | Zod-схема POST body |
 | `src/main.ts` | демо-граф і `listen(..., 3000)` |
-| `test/` | тести |
+| `test/lifecycle-order.test.ts` | точний порядок шести етапів |
+| `test/` | решта тестів |
 
 ## Можливості
 - збирає граф будь-якої глибини за типами конструктора — списку `deps` немає ніде;
@@ -47,7 +50,30 @@ docker compose run --rm api npm test
 - цикл падає з ланцюгом `Left -> Right -> Left`, а не зі `RangeError`;
 - клас без `@Injectable()` не створює й каже про це прямо.
 - `@Controller` + `@Get`/`@Post` збираються в маршрути з метаданих; `@Param`/`@Query`/`@Body` — у аргументи хендлера;
-- невалідний DTO → 400 `[{ field, constraints }]`, валідний — екземпляр класу.
+- невалідний body → 400 `[{ field, constraints }]`, валідний — plain-обʼєкт зі Zod, не `instanceof` DTO.
+
+## Цикл запиту
+
+```
+request
+  └─ middleware
+       └─ guard                    false → 403, interceptor не стартує
+            └─ interceptor:before
+                 └─ pipe
+                      └─ handler   throw → filter (after немає)
+                 interceptor:after
+```
+
+Guard каже лише «пускати чи ні». Interceptor обгортає виклик і бачить і вхід, і вихід.
+Pipe чіпає один аргумент. Filter — єдине місце, де помилка стає HTTP.
+
+## Чому AsyncLocalStorage, а не `let requestId`
+
+Поки один запит стоїть на `await`, event loop бере наступний. Глобальна змінна (або поле
+singleton-сервісу) на цей момент уже чужа: лог глибше в стеку підпише не той id.
+`als.run({ requestId }, ...)` привʼязує сховище до async-ланцюга цього запиту.
+`als.getStore()` у `Logger` / `UserRepo` читає своє без параметра в сигнатурі.
+Паралельні `X-Request-Id` у відповіді й у тілі не змішуються.
 
 ## Як це працює
 

@@ -1,4 +1,5 @@
 import { ValidationFailed } from '../pipes/zod-validation.pipe.js';
+import { NotFoundError } from '../errors/not-found.error.js';
 
 export class HttpFilter {
     catch(error: any, res: any){
@@ -10,7 +11,11 @@ export class HttpFilter {
             res.statusCode = 400;
             res.end(JSON.stringify(error.errors));
             return;
-          } else {
+          } else if(error instanceof NotFoundError) {
+            res.statusCode = 404;
+            res.end(JSON.stringify({error: error.message}));
+            return;
+          }  else {
             res.statusCode = 500;
             res.end(JSON.stringify({ error: 'internal' }));
             return;
