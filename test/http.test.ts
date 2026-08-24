@@ -11,11 +11,23 @@ import { Body, Param, Query } from '../src/decorators/param.js';
 import { CreateUserDto } from '../src/dto/create-user.dto.js';
 import { listen } from '../src/dispatcher.js';
 
+const PHASES = [
+  'middleware',
+  'guard',
+  'interceptor:before',
+  'pipe',
+  'handler',
+  'interceptor:after',
+] as const;
+
+let findCalled = false;
+
 @Injectable()
 @Controller('users')
 class UsersController {
   @Get(':id')
   find(@Param('id') id: string, @Query('limit') limit: string) {
+    findCalled = true;
     return { id, limit };
   }
 
@@ -25,11 +37,20 @@ class UsersController {
   }
 }
 
+@Injectable()
+@Controller('crash')
+class CrashController {
+  @Get()
+  boom() {
+    throw new Error('boom');
+  }
+}
+
 let server: Server;
 let base: string;
 
 before(async () => {
-  server = await listen(new Container(), [UsersController], 0);
+  server = await listen(new Container(), [UsersController, CrashController], 0);
   const addr = server.address() as AddressInfo;
   base = `http://127.0.0.1:${addr.port}`;
 });
@@ -40,49 +61,122 @@ after(async () => {
   });
 });
 
+const auth = { authorization: 'Bearer x' };
+
 test('невідомий шлях дає 404', async () => {
   const res = await fetch(`${base}/nope`);
   assert.equal(res.status, 404);
 });
 
 test('GET /users/:id склеює префікс і шлях', async () => {
-  const res = await fetch(`${base}/users/42`);
+  const res = await fetch(`${base}/users/42`, { headers: auth });
   assert.equal(res.status, 200);
   assert.equal((await res.json()).id, '42');
 });
 
 test('@Param підставляє id аргументом, не з req вручну', async () => {
-  const body = await (await fetch(`${base}/users/7`)).json();
+  const body = await (await fetch(`${base}/users/7`, { headers: auth })).json();
   assert.equal(body.id, '7');
 });
 
 test('@Query підставляє limit', async () => {
-  const body = await (await fetch(`${base}/users/42?limit=5`)).json();
+  const body = await (await fetch(`${base}/users/42?limit=5`, { headers: auth })).json();
   assert.equal(body.limit, '5');
 });
 
-test('невалідний DTO дає 400 зі списком field/constraints', async () => {
+test('невалідний body дає 400 зі списком field/constraints', async () => {
   const res = await fetch(`${base}/users`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify({ name: 'A' }),
   });
   const errors = await res.json();
 
   assert.equal(res.status, 400);
-  assert.equal(errors[0].field, 'name');
-  assert.ok(errors[0].constraints.minLength);
+  assert.ok(Array.isArray(errors));
+  assert.ok(errors.some((error: { field: string }) => error.field === 'name'));
+  assert.ok(errors[0].constraints);
 });
 
-test('валідний DTO доходить до методу як екземпляр класу', async () => {
+test('валідний body доходить до методу (Zod віддає plain-обʼєкт)', async () => {
   const res = await fetch(`${base}/users`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'Ada' }),
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Ada', email: 'ada@example.com' }),
   });
   const body = await res.json();
 
   assert.equal(res.status, 200);
   assert.equal(body.name, 'Ada');
-  assert.equal(body.isDto, true);
+  assert.equal(body.isDto, false);
+});
+
+test('порядок шарів: middleware → guard → interceptor → pipe → handler', async () => {
+  const orig = console.log;
+  const steps: string[] = [];
+  console.log = (msg?: unknown, ...rest: unknown[]) => {
+    if (typeof msg === 'string' && (PHASES as readonly string[]).includes(msg)) {
+      steps.push(msg);
+    }
+    orig(msg, ...rest);
+  };
+
+  try {
+    const res = await fetch(`${base}/users/42`, { headers: auth });
+    assert.equal(res.status, 200);
+    assert.deepEqual(steps, [...PHASES]);
+  } finally {
+    console.log = orig;
+  }
+});
+
+test('без Authorization — 403, хендлер не викликається', async () => {
+  findCalled = false;
+  const res = await fetch(`${base}/users/42`);
+  assert.equal(res.status, 403);
+  assert.equal(findCalled, false);
+});
+
+test('interceptor пише рядок з ms', async () => {
+  const orig = console.log;
+  const lines: string[] = [];
+  console.log = (msg?: unknown, ...rest: unknown[]) => {
+    lines.push([msg, ...rest].map(String).join(' '));
+    orig(msg, ...rest);
+  };
+
+  try {
+    await fetch(`${base}/users/42`, { headers: auth });
+    assert.ok(lines.some((line) => /\d+ ms/.test(line)));
+  } finally {
+    console.log = orig;
+  }
+});
+
+test('помилка хендлера → 500 без тексту boom', async () => {
+  const res = await fetch(`${base}/crash`, { headers: auth });
+  const text = await res.text();
+  assert.equal(res.status, 500);
+  assert.equal(text.includes('boom'), false);
+});
+
+test('X-Request-Id з запиту повертається у відповіді', async () => {
+  const res = await fetch(`${base}/users/42`, {
+    headers: { ...auth, 'x-request-id': 'abc' },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('x-request-id'), 'abc');
+});
+
+test('паралельні запити не змішують X-Request-Id', async () => {
+  const ids = Array.from({ length: 10 }, (_, i) => `id-${i}`);
+  const headersList = await Promise.all(
+    ids.map(async (id) => {
+      const res = await fetch(`${base}/users/42`, {
+        headers: { ...auth, 'x-request-id': id },
+      });
+      return res.headers.get('x-request-id');
+    }),
+  );
+  assert.deepEqual(headersList, ids);
 });

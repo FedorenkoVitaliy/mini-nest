@@ -1,8 +1,8 @@
 # mini-nest
 
-Свій IoC-контейнер і HTTP-шар поверх `node:http`. Частина 2 з 3.
+Свій IoC-контейнер і HTTP-шар поверх `node:http`. Частина 3 з 3: цикл запиту.
 
-TypeScript 6, `reflect-metadata`, `class-validator` + `class-transformer`, тести на `node:test`. Nest / Express / Fastify немає.
+TypeScript 6, `reflect-metadata`, Zod 4, `AsyncLocalStorage`, тести на `node:test`. Nest / Express / Fastify немає.
 
 ## Запуск
 
@@ -30,9 +30,13 @@ docker compose run --rm api npm test
 | `src/decorators/methods.ts` | `@Get` / `@Post` — метод і шлях на хендлері |
 | `src/decorators/param.ts` | `@Body` / `@Param` / `@Query` — звідки брати аргумент |
 | `src/router.ts` | збір маршрутів з метаданих |
-| `src/dispatcher.ts` | `node:http`: матч шляху, args, пайп, виклик через контейнер |
-| `src/pipes/validation.pipe.ts` | `plainToInstance` + `validate` → 400 або екземпляр DTO |
-| `src/dto/create-user.dto.ts` | контракт тіла POST |
+| `src/dispatcher.ts` | `node:http`: матч, ALS, guard, interceptor, пайп, filter |
+| `src/guards/auth.guard.ts` | `canActivate` — є `Authorization` чи ні |
+| `src/interceptors/logging.interceptor.ts` | обгортка: лог до/після + `ms` |
+| `src/pipes/zod-validation.pipe.ts` | `safeParse` → дані або `ValidationFailed` |
+| `src/filters/http-exception.filter.ts` | помилка → 400 / 500 |
+| `src/context/request-context.ts` | `AsyncLocalStorage` з `requestId` |
+| `src/dto/create-user.schema.ts` | Zod-схема POST body |
 | `src/main.ts` | демо-граф і `listen(..., 3000)` |
 | `test/` | тести |
 
