@@ -43,7 +43,9 @@ export function listen(container: Container, controllers: Ctor[], port: number):
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
 
-    const requestId = String(req.headers['x-request-id'] ?? crypto.randomUUID())
+    const header = req.headers['x-request-id'];
+    const fromClient = Array.isArray(header) ? header[0] : header;
+    const requestId = fromClient?.trim() ? fromClient : crypto.randomUUID();
     res.setHeader('x-request-id', requestId);
 
     await als.run({ requestId }, async () => { 

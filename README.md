@@ -37,7 +37,7 @@ docker compose run --rm api npm test
 | `src/filters/exception.filter.ts` | помилка → 404 / 400 / 500 |
 | `src/errors/not-found.error.ts` | доменна `NotFoundError` |
 | `src/context/request-context.ts` | `AsyncLocalStorage` з `requestId` |
-| `src/services/` | логер і репозиторій читають id зі store |
+| `src/services/` | `Logger` читає `requestId` зі store; репо лише кличе логер |
 | `src/dto/create-user.schema.ts` | Zod-схема POST body |
 | `src/main.ts` | демо-граф і `listen(..., 3000)` |
 | `test/lifecycle-order.test.ts` | точний порядок шести етапів |
@@ -72,7 +72,7 @@ Pipe чіпає один аргумент. Filter — єдине місце, д�
 Поки один запит стоїть на `await`, event loop бере наступний. Глобальна змінна (або поле
 singleton-сервісу) на цей момент уже чужа: лог глибше в стеку підпише не той id.
 `als.run({ requestId }, ...)` привʼязує сховище до async-ланцюга цього запиту.
-`als.getStore()` у `Logger` / `UserRepo` читає своє без параметра в сигнатурі.
+`als.getStore()` у `Logger.log` читає своє без параметра в сигнатурі.
 Паралельні `X-Request-Id` у відповіді й у тілі не змішуються.
 
 ## Як це працює
