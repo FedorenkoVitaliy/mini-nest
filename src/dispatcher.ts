@@ -4,6 +4,8 @@ import { collectRoutes } from './router.js';
 
 import { PARAM_METADATA } from './tokens.js';
 import { ValidationFailed, ValidationPipe } from './pipes/validation.pipe.js';
+import { AuthGuard } from './guards/auth.guard.js';
+import { LoggingInterceptor } from './interceptors/logging.interceptor.js';
 
 function matchPath(pattern: string, pathname: string) {
   const fromRoute = pattern.split('/').filter(Boolean);
@@ -49,12 +51,12 @@ export function listen(container: Container, controllers: Ctor[], port: number):
       return;
     }
 
-    const params = matchPath(matchedRoute.path, url.pathname)!;
-    const ctrl = container.resolve(matchedRoute.Controller) as Record<string, Function>;
-    const meta = Reflect.getMetadata(PARAM_METADATA, matchedRoute.Controller.prototype, matchedRoute.handler) ?? {};
-    let body: unknown;
-    if (req.method === 'POST') {
-      try{
+    try{
+      const params = matchPath(matchedRoute.path, url.pathname)!;
+      const ctrl = container.resolve(matchedRoute.Controller) as Record<string, Function>;
+      const meta = Reflect.getMetadata(PARAM_METADATA, matchedRoute.Controller.prototype, matchedRoute.handler) ?? {};
+      let body: unknown;
+      if (req.method === 'POST') {
         body = await new Promise((resolve, reject) => {
           const chunks: Buffer[] = [];
           req.on('data', (chunk) => chunks.push(chunk));
@@ -63,6 +65,7 @@ export function listen(container: Container, controllers: Ctor[], port: number):
             if(raw){
               try{
                 resolve(JSON.parse(raw))
+                return
               } catch (error) {
                 reject(error)
                 return
@@ -73,47 +76,57 @@ export function listen(container: Container, controllers: Ctor[], port: number):
           });
           req.on('error', reject);
         })
-      } catch(error) {
+      }
+      const args = Object.keys(meta).reduce<unknown[]>((acc, key) => {
+        const spec = meta[key];
+        const i = Number(key);
+        if (spec.type === 'param') acc[i] = params[spec.name];
+        if (spec.type === 'query') acc[i] = url.searchParams.get(spec.name);
+        if (spec.type === 'body') acc[i] = body;
+        return acc;
+      }, []);
+  
+      const paramTypes = (Reflect.getMetadata(
+        'design:paramtypes',
+        matchedRoute.Controller.prototype,
+        matchedRoute.handler,
+      ) ?? []) as Ctor[];
+      console.log('middleware');
+
+      console.log('guard');
+      if(!new AuthGuard().canActivate(req)){
+        res.statusCode = 403;
+        res.end(JSON.stringify({ error: 'Can not activate' }));
+        return;
+      }   
+
+      const raw = await new LoggingInterceptor().intercept(async () => { 
+        console.log('pipe');
+        for (let i = 0; i < args.length; i++) {
+          args[i] = await pipe.transform(args[i], paramTypes[i]);
+        }
+     
+        console.log('handler');
+        return await ctrl[matchedRoute.handler](...args);
+      })
+
+      return res.end(JSON.stringify(raw));
+
+
+    } catch (error) {
+      if(error instanceof SyntaxError){
         res.statusCode = 400;
         res.end(JSON.stringify({ error: 'invalid json' }));
         return;
-      }
-    }
-    const args = Object.keys(meta).reduce<unknown[]>((acc, key) => {
-      const spec = meta[key];
-      const i = Number(key);
-      if (spec.type === 'param') acc[i] = params[spec.name];
-      if (spec.type === 'query') acc[i] = url.searchParams.get(spec.name);
-      if (spec.type === 'body') acc[i] = body;
-      return acc;
-    }, []);
-
-    const paramTypes = (Reflect.getMetadata(
-      'design:paramtypes',
-      matchedRoute.Controller.prototype,
-      matchedRoute.handler,
-    ) ?? []) as Ctor[];
-
-    try {
-      for (let i = 0; i < args.length; i++) {
-        args[i] = await pipe.transform(args[i], paramTypes[i]);
-      }
-    } catch (error) {
-      if (error instanceof ValidationFailed) {
+      } else if(error instanceof ValidationFailed) {
         res.statusCode = 400;
         res.end(JSON.stringify(error.errors));
         return;
+      } else {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: 'internal' }));
+        return;
       }
-      throw error;
-    }
-
-    try{
-      const raw = await ctrl[matchedRoute.handler](...args);
-      res.end(JSON.stringify(raw));
-    } catch {
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: 'internal' }));
-      return;
     }
   });
 
