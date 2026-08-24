@@ -3,9 +3,10 @@ import type { Container, Ctor } from './container.js';
 import { collectRoutes } from './router.js';
 
 import { PARAM_METADATA } from './tokens.js';
-import { ValidationFailed, ValidationPipe } from './pipes/validation.pipe.js';
+import { ZodValidationPipe } from './pipes/zod-validation.pipe.js';
 import { AuthGuard } from './guards/auth.guard.js';
 import { LoggingInterceptor } from './interceptors/logging.interceptor.js';
+import { HttpFilter } from './filters/http-exception.filter.js';
 
 function matchPath(pattern: string, pathname: string) {
   const fromRoute = pattern.split('/').filter(Boolean);
@@ -35,7 +36,7 @@ export function listen(container: Container, controllers: Ctor[], port: number):
     return acc;
   }, [] as { method: string; path: string; handler: string; Controller: Ctor }[]);
 
-  const pipe = new ValidationPipe();
+  const pipe = new ZodValidationPipe();
 
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -108,25 +109,13 @@ export function listen(container: Container, controllers: Ctor[], port: number):
      
         console.log('handler');
         return await ctrl[matchedRoute.handler](...args);
-      })
+      }, {method: req.method, path: url.pathname})
 
       return res.end(JSON.stringify(raw));
 
 
     } catch (error) {
-      if(error instanceof SyntaxError){
-        res.statusCode = 400;
-        res.end(JSON.stringify({ error: 'invalid json' }));
-        return;
-      } else if(error instanceof ValidationFailed) {
-        res.statusCode = 400;
-        res.end(JSON.stringify(error.errors));
-        return;
-      } else {
-        res.statusCode = 500;
-        res.end(JSON.stringify({ error: 'internal' }));
-        return;
-      }
+      new HttpFilter().catch(error, res)
     }
   });
 
