@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Container, Ctor } from './container.js';
 import { collectRoutes } from './router.js';
 
@@ -30,6 +30,38 @@ function matchPath(pattern: string, pathname: string) {
   return params;
 }
 
+type Next = () => void | Promise<void>;
+type Stage = (req: IncomingMessage, res: ServerResponse, next: Next) => void | Promise<void>;
+
+const stages: Stage[] = [
+  (_req, _res, next) => {
+    console.log('middleware');
+    return next();
+  },
+  (_req, _res, next) => {
+    console.log('guard');
+    if(!new AuthGuard().canActivate(_req)){
+      _res.statusCode = 403;
+      _res.end(JSON.stringify({ error: 'Can not activate' }));
+      return;
+    }   
+    return next();
+  },
+];
+
+async function runStages(list: Stage[], req: IncomingMessage, res: ServerResponse, last: Next): Promise<void> {
+  let i = 0;
+  const next = async (): Promise<void> => {
+    const stage = list[i++];
+    if (!stage) {
+      await last();
+      return;
+    }
+    await stage(req, res, next);
+  };
+  await next();
+}
+
 export function listen(container: Container, controllers: Ctor[], port: number): Promise<Server> {
   const routeList = controllers.reduce((acc, Controller) => {
     collectRoutes(Controller).forEach((route) => {
@@ -59,61 +91,65 @@ export function listen(container: Container, controllers: Ctor[], port: number):
         const ctrl = container.resolve(matchedRoute.Controller) as Record<string, Function>;
         const meta = Reflect.getMetadata(PARAM_METADATA, matchedRoute.Controller.prototype, matchedRoute.handler) ?? {};
         let body: unknown;
-        if (req.method === 'POST') {
-          body = await new Promise((resolve, reject) => {
-            const chunks: Buffer[] = [];
-            req.on('data', (chunk) => chunks.push(chunk));
-            req.on('end', () => {
-              const raw = Buffer.concat(chunks).toString();
-              if(raw){
-                try{
-                  resolve(JSON.parse(raw))
-                  return
-                } catch (error) {
-                  reject(error)
-                  return
-                }
-              }
-  
-              resolve(undefined);
-            });
-            req.on('error', reject);
-          })
-        }
-        const args = Object.keys(meta).reduce<unknown[]>((acc, key) => {
-          const spec = meta[key];
-          const i = Number(key);
-          if (spec.type === 'param') acc[i] = params[spec.name];
-          if (spec.type === 'query') acc[i] = url.searchParams.get(spec.name);
-          if (spec.type === 'body') acc[i] = body;
-          return acc;
-        }, []);
+        let args: unknown[] = [] 
     
         const paramTypes = (Reflect.getMetadata(
           'design:paramtypes',
           matchedRoute.Controller.prototype,
           matchedRoute.handler,
         ) ?? []) as Ctor[];
-        console.log('middleware');
-  
-        console.log('guard');
-        if(!new AuthGuard().canActivate(req)){
-          res.statusCode = 403;
-          res.end(JSON.stringify({ error: 'Can not activate' }));
-          return;
-        }   
-  
-        const raw = await new LoggingInterceptor().intercept(async () => { 
-          console.log('pipe');
-          for (let i = 0; i < args.length; i++) {
-            args[i] = await pipe.transform(args[i], paramTypes[i]);
+
+        const parseBody: Stage = async (_req, _res, next) => {
+          if (req.method === 'POST') {
+            body = await new Promise((resolve, reject) => {
+              const chunks: Buffer[] = [];
+              req.on('data', (chunk) => chunks.push(chunk));
+              req.on('end', () => {
+                const raw = Buffer.concat(chunks).toString();
+                if(raw){
+                  try{
+                    resolve(JSON.parse(raw))
+                    return
+                  } catch (error) {
+                    reject(error)
+                    return
+                  }
+                }
+    
+                resolve(undefined);
+              });
+              req.on('error', reject);
+            })
           }
-       
-          console.log('handler');
-          return await ctrl[matchedRoute.handler](...args);
-        }, {method: req.method, path: url.pathname})
-  
-        return res.end(JSON.stringify(raw));
+
+          args = Object.keys(meta).reduce<unknown[]>((acc, key) => {
+            const spec = meta[key];
+            const i = Number(key);
+            if (spec.type === 'param') acc[i] = params[spec.name];
+            if (spec.type === 'query') acc[i] = url.searchParams.get(spec.name);
+            if (spec.type === 'body') acc[i] = body;
+            return acc;
+          }, []);
+         
+          return next();
+        };
+
+        const invoke: Stage = async (_req, _res, next) => {
+          const raw = await new LoggingInterceptor().intercept(async () => {
+            console.log('pipe');
+            for (let i = 0; i < args.length; i++) {
+              args[i] = await pipe.transform(args[i], paramTypes[i]);
+            }
+
+            console.log('handler');
+            return await ctrl[matchedRoute.handler](...args);
+          }, { method: req.method, path: url.pathname });
+
+          res.end(JSON.stringify(raw));
+          return next();
+        };
+
+        await runStages([...stages, parseBody, invoke], req, res, async () => {});
   
   
       } catch (error) {
