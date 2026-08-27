@@ -3,46 +3,17 @@ import { collectRoutes } from './router.js';
 import { listen } from './dispatcher.js';
 import { Container } from './container.js';
 import { Injectable } from './decorators/injectable.js';
-import { Inject } from './decorators/inject.js';
+
 import { Controller } from './decorators/controller.js';
 import { Get, Post } from './decorators/methods.js';
 import { Param, Query, Body } from './decorators/param.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
 
-import { CONFIG_TOKEN, ROUTE_METADATA } from './tokens.js';
+import { AppConfig } from './services/logger.js';
+import { UserService } from './services/user-service.js';
 
-interface AppConfig {
-  dbUrl: string;
-}
+import { CONFIG_TOKEN } from './tokens.js';
 
-@Injectable()
-class Logger {
-  constructor(@Inject(CONFIG_TOKEN) private readonly config: AppConfig) {}
-
-  log(message: string): void {
-    console.log(`[log] ${message} (db=${this.config.dbUrl})`);
-  }
-}
-
-@Injectable()
-class UserRepo {
-  constructor(private readonly logger: Logger) {}
-
-  find(id: string): { id: string } {
-    this.logger.log(`find user ${id}`);
-
-    return { id };
-  }
-}
-
-@Injectable()
-class UserService {
-  constructor(private readonly repo: UserRepo) {}
-
-  get(id: string): { id: string } {
-    return this.repo.find(id);
-  }
-}
 
 @Injectable({ scope: 'transient' })
 class RequestId {

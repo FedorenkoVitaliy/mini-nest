@@ -1,8 +1,8 @@
 # mini-nest
 
-Свій IoC-контейнер і HTTP-шар поверх `node:http`. Частина 2 з 3.
+Свій IoC-контейнер і HTTP-шар поверх `node:http`. Частина 3 з 3: цикл запиту.
 
-TypeScript 6, `reflect-metadata`, `class-validator` + `class-transformer`, тести на `node:test`. Nest / Express / Fastify немає.
+TypeScript 6, `reflect-metadata`, Zod 4, `AsyncLocalStorage`, тести на `node:test`. Nest / Express / Fastify немає.
 
 ## Запуск
 
@@ -30,11 +30,18 @@ docker compose run --rm api npm test
 | `src/decorators/methods.ts` | `@Get` / `@Post` — метод і шлях на хендлері |
 | `src/decorators/param.ts` | `@Body` / `@Param` / `@Query` — звідки брати аргумент |
 | `src/router.ts` | збір маршрутів з метаданих |
-| `src/dispatcher.ts` | `node:http`: матч шляху, args, пайп, виклик через контейнер |
-| `src/pipes/validation.pipe.ts` | `plainToInstance` + `validate` → 400 або екземпляр DTO |
-| `src/dto/create-user.dto.ts` | контракт тіла POST |
+| `src/dispatcher.ts` | `node:http`: матч, ALS, guard, interceptor, пайп, filter |
+| `src/guards/auth.guard.ts` | `canActivate` — є `Authorization` чи ні |
+| `src/interceptors/logging.interceptor.ts` | обгортка: лог до/після + `ms` |
+| `src/pipes/zod-validation.pipe.ts` | `safeParse` → дані або `ValidationFailed` |
+| `src/filters/exception.filter.ts` | помилка → 404 / 400 / 500 |
+| `src/errors/not-found.error.ts` | доменна `NotFoundError` |
+| `src/context/request-context.ts` | `AsyncLocalStorage` з `requestId` |
+| `src/services/` | `Logger` читає `requestId` зі store; репо лише кличе логер |
+| `src/dto/create-user.schema.ts` | Zod-схема POST body |
 | `src/main.ts` | демо-граф і `listen(..., 3000)` |
-| `test/` | тести |
+| `test/lifecycle-order.test.ts` | точний порядок шести етапів |
+| `test/` | решта тестів |
 
 ## Можливості
 - збирає граф будь-якої глибини за типами конструктора — списку `deps` немає ніде;
@@ -43,7 +50,30 @@ docker compose run --rm api npm test
 - цикл падає з ланцюгом `Left -> Right -> Left`, а не зі `RangeError`;
 - клас без `@Injectable()` не створює й каже про це прямо.
 - `@Controller` + `@Get`/`@Post` збираються в маршрути з метаданих; `@Param`/`@Query`/`@Body` — у аргументи хендлера;
-- невалідний DTO → 400 `[{ field, constraints }]`, валідний — екземпляр класу.
+- невалідний body → 400 `[{ field, constraints }]`, валідний — plain-обʼєкт зі Zod, не `instanceof` DTO.
+
+## Цикл запиту
+
+```
+request
+  └─ middleware
+       └─ guard                    false → 403, interceptor не стартує
+            └─ interceptor:before
+                 └─ pipe
+                      └─ handler   throw → filter (after немає)
+                 interceptor:after
+```
+
+Guard каже лише «пускати чи ні». Interceptor обгортає виклик і бачить і вхід, і вихід.
+Pipe чіпає один аргумент. Filter — єдине місце, де помилка стає HTTP.
+
+## Чому AsyncLocalStorage, а не `let requestId`
+
+Поки один запит стоїть на `await`, event loop бере наступний. Глобальна змінна (або поле
+singleton-сервісу) на цей момент уже чужа: лог глибше в стеку підпише не той id.
+`als.run({ requestId }, ...)` привʼязує сховище до async-ланцюга цього запиту.
+`als.getStore()` у `Logger.log` читає своє без параметра в сигнатурі.
+Паралельні `X-Request-Id` у відповіді й у тілі не змішуються.
 
 ## Як це працює
 

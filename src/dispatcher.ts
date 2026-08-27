@@ -1,9 +1,14 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Container, Ctor } from './container.js';
 import { collectRoutes } from './router.js';
 
 import { PARAM_METADATA } from './tokens.js';
-import { ValidationFailed, ValidationPipe } from './pipes/validation.pipe.js';
+import { ZodValidationPipe } from './pipes/zod-validation.pipe.js';
+import { AuthGuard } from './guards/auth.guard.js';
+import { LoggingInterceptor } from './interceptors/logging.interceptor.js';
+import { HttpFilter } from './filters/exception.filter.js';
+import { als } from './context/request-context.js';
+import { NotFoundError } from './errors/not-found.error.js';
 
 function matchPath(pattern: string, pathname: string) {
   const fromRoute = pattern.split('/').filter(Boolean);
@@ -25,6 +30,38 @@ function matchPath(pattern: string, pathname: string) {
   return params;
 }
 
+type Next = () => void | Promise<void>;
+type Stage = (req: IncomingMessage, res: ServerResponse, next: Next) => void | Promise<void>;
+
+const stages: Stage[] = [
+  (_req, _res, next) => {
+    console.log('middleware');
+    return next();
+  },
+  (_req, _res, next) => {
+    console.log('guard');
+    if(!new AuthGuard().canActivate(_req)){
+      _res.statusCode = 403;
+      _res.end(JSON.stringify({ error: 'Can not activate' }));
+      return;
+    }   
+    return next();
+  },
+];
+
+async function runStages(list: Stage[], req: IncomingMessage, res: ServerResponse, last: Next): Promise<void> {
+  let i = 0;
+  const next = async (): Promise<void> => {
+    const stage = list[i++];
+    if (!stage) {
+      await last();
+      return;
+    }
+    await stage(req, res, next);
+  };
+  await next();
+}
+
 export function listen(container: Container, controllers: Ctor[], port: number): Promise<Server> {
   const routeList = controllers.reduce((acc, Controller) => {
     collectRoutes(Controller).forEach((route) => {
@@ -33,88 +70,92 @@ export function listen(container: Container, controllers: Ctor[], port: number):
     return acc;
   }, [] as { method: string; path: string; handler: string; Controller: Ctor }[]);
 
-  const pipe = new ValidationPipe();
+  const pipe = new ZodValidationPipe();
 
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
 
-    const url = new URL(req.url ?? '/', 'http://x');
-    const matchedRoute = routeList.find(
-      (route) => route.method === req.method && matchPath(route.path, url.pathname) !== null,
-    );
+    const header = req.headers['x-request-id'];
+    const fromClient = Array.isArray(header) ? header[0] : header;
+    const requestId = fromClient?.trim() ? fromClient : crypto.randomUUID();
+    res.setHeader('x-request-id', requestId);
 
-    if (!matchedRoute) {
-      res.statusCode = 404;
-      res.end(JSON.stringify({ error: 'not found' }));
-      return;
-    }
-
-    const params = matchPath(matchedRoute.path, url.pathname)!;
-    const ctrl = container.resolve(matchedRoute.Controller) as Record<string, Function>;
-    const meta = Reflect.getMetadata(PARAM_METADATA, matchedRoute.Controller.prototype, matchedRoute.handler) ?? {};
-    let body: unknown;
-    if (req.method === 'POST') {
+    await als.run({ requestId }, async () => { 
       try{
-        body = await new Promise((resolve, reject) => {
-          const chunks: Buffer[] = [];
-          req.on('data', (chunk) => chunks.push(chunk));
-          req.on('end', () => {
-            const raw = Buffer.concat(chunks).toString();
-            if(raw){
-              try{
-                resolve(JSON.parse(raw))
-              } catch (error) {
-                reject(error)
-                return
-              }
+        const url = new URL(req.url ?? '/', 'http://x');
+        const matchedRoute = routeList.find(
+          (route) => route.method === req.method && matchPath(route.path, url.pathname) !== null,
+        );
+        if (!matchedRoute) { throw new NotFoundError(`Cannot ${req.method} ${url.pathname}`) }
+        const params = matchPath(matchedRoute.path, url.pathname)!;
+        const ctrl = container.resolve(matchedRoute.Controller) as Record<string, Function>;
+        const meta = Reflect.getMetadata(PARAM_METADATA, matchedRoute.Controller.prototype, matchedRoute.handler) ?? {};
+        let body: unknown;
+        let args: unknown[] = [] 
+    
+        const paramTypes = (Reflect.getMetadata(
+          'design:paramtypes',
+          matchedRoute.Controller.prototype,
+          matchedRoute.handler,
+        ) ?? []) as Ctor[];
+
+        const parseBody: Stage = async (_req, _res, next) => {
+          if (req.method === 'POST') {
+            body = await new Promise((resolve, reject) => {
+              const chunks: Buffer[] = [];
+              req.on('data', (chunk) => chunks.push(chunk));
+              req.on('end', () => {
+                const raw = Buffer.concat(chunks).toString();
+                if(raw){
+                  try{
+                    resolve(JSON.parse(raw))
+                    return
+                  } catch (error) {
+                    reject(error)
+                    return
+                  }
+                }
+    
+                resolve(undefined);
+              });
+              req.on('error', reject);
+            })
+          }
+
+          args = Object.keys(meta).reduce<unknown[]>((acc, key) => {
+            const spec = meta[key];
+            const i = Number(key);
+            if (spec.type === 'param') acc[i] = params[spec.name];
+            if (spec.type === 'query') acc[i] = url.searchParams.get(spec.name);
+            if (spec.type === 'body') acc[i] = body;
+            return acc;
+          }, []);
+         
+          return next();
+        };
+
+        const invoke: Stage = async (_req, _res, next) => {
+          const raw = await new LoggingInterceptor().intercept(async () => {
+            console.log('pipe');
+            for (let i = 0; i < args.length; i++) {
+              args[i] = await pipe.transform(args[i], paramTypes[i]);
             }
 
-            resolve(undefined);
-          });
-          req.on('error', reject);
-        })
-      } catch(error) {
-        res.statusCode = 400;
-        res.end(JSON.stringify({ error: 'invalid json' }));
-        return;
-      }
-    }
-    const args = Object.keys(meta).reduce<unknown[]>((acc, key) => {
-      const spec = meta[key];
-      const i = Number(key);
-      if (spec.type === 'param') acc[i] = params[spec.name];
-      if (spec.type === 'query') acc[i] = url.searchParams.get(spec.name);
-      if (spec.type === 'body') acc[i] = body;
-      return acc;
-    }, []);
+            console.log('handler');
+            return await ctrl[matchedRoute.handler](...args);
+          }, { method: req.method, path: url.pathname });
 
-    const paramTypes = (Reflect.getMetadata(
-      'design:paramtypes',
-      matchedRoute.Controller.prototype,
-      matchedRoute.handler,
-    ) ?? []) as Ctor[];
+          res.end(JSON.stringify(raw));
+          return next();
+        };
 
-    try {
-      for (let i = 0; i < args.length; i++) {
-        args[i] = await pipe.transform(args[i], paramTypes[i]);
+        await runStages([...stages, parseBody, invoke], req, res, async () => {});
+  
+  
+      } catch (error) {
+        new HttpFilter().catch(error, res)
       }
-    } catch (error) {
-      if (error instanceof ValidationFailed) {
-        res.statusCode = 400;
-        res.end(JSON.stringify(error.errors));
-        return;
-      }
-      throw error;
-    }
-
-    try{
-      const raw = await ctrl[matchedRoute.handler](...args);
-      res.end(JSON.stringify(raw));
-    } catch {
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: 'internal' }));
-      return;
-    }
+    })
   });
 
   return new Promise((resolve, reject) => {
